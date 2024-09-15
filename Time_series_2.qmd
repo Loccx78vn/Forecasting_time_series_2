@@ -6,10 +6,12 @@ description: "Đây là bài viết của tôi về cách sử dụng R trong vi
 author: "Cao Xuân Lộc"
 date: "2024-09-07"
 bibliography: references.bib
+css: style.css
 format: 
   html:
     code-fold: true
     code-tools: true
+    page-layout: article
 number-sections: true
 ---
 
@@ -230,7 +232,6 @@ Trước khi sử dụng `modeltime.h2o`, cần phải kết nối với dạng 
 ```{r}
 #| warining: false
 #| message: false
-#| echo: true
 #| output: false
 h2o.init(
     nthreads = -1,
@@ -239,13 +240,25 @@ h2o.init(
 )
 ```
 
+Ngoài ra có một điều lưu ý khi bạn làm việc với package `modeltime` đó là output từ R sẽ xuất hiện các dòng như kiểu `|=========================================| 100% ` và khi xuất output ra dạng HTML hay PDF thì nó vẫn xuất hiện. Điều này làm xấu đi bài báo cáo của mình nên chúng ta có thể sử dụng hàm `sink()` để R hiểu và chỉ đưa ra kết quả cuối cùng, bỏ qua thông báo từ process.
+
+```{r}
+# Hạn chế process trong output:
+sink(tempfile())
+on.exit(sink())
+# Trờ lại bình thường:
+sink()
+```
+
+Hai hàm trên có công dụng ngăn R xuất ra output vậy nên nếu bạn muốn R trở lại bình thường thì chỉ cần chạy thêm hàm `sink()` là xong.
+
 ```{r}
 #| warining: false
 #| message: false
 #| output: false
 library(modeltime.h2o)
 library(parsnip)
-## Tạo ra các tiêu chí cho mô hình:
+    ## Tạo ra các tiêu chí cho mô hình:
 model_spec <- automl_reg(mode = 'regression') %>%
     set_engine(
          engine                     = 'h2o',
@@ -266,6 +279,7 @@ model_fitted <- model_spec %>%
 
 ```{r}
 #| echo: false
+#| warning: false
 m<-automl_leaderboard(model_fitted)
 library(gt)
 library(gtExtras)
@@ -291,9 +305,29 @@ Ngoài ra, giả sử bạn chỉ cần tên các mô hình tốt nhất xếp t
 
 Cuối cùng, ta sẽ dùng mô hình tốt nhất được nhắc ở trên để dự đoán dữ liệu bằng hàm `predict`.
 
+Bảng dưới đây trình bày về giá trị dự đoán ở cả 4 nhà kho. Vì để minh họa nên mình chỉ thể hiện 6 hàng đầu tiên của bảng.
+
 ```{r}
 #| output: false
-predict(model_fitted, test_tbl)
+n<-predict(model_fitted, test_tbl)
+n<-head(n) %>% 
+     mutate(Date = head(test_tbl$Date),
+            Warehouse = c("A","C","J","S","A","C"))
+library(gt)
+library(gtExtras)
+gt(n[c("Date","Warehouse",".pred")]) %>% 
+   cols_label(
+    Date = md("**Ngày dự báo**"),
+    Warehouse = md("**Nhà kho**"),
+    .pred = md("**Giá trị dự báo**")) %>%
+  cols_align(
+    align = "center",
+    columns = Warehouse
+  ) %>% 
+   tab_header(
+    title = md("**Kết quả dự báo**"),
+    subtitle = md("Nguồn: package modeltime.h2o")) %>% 
+  gt_theme_538()
 ```
 
 ## Đánh giá mô hình:
@@ -307,28 +341,118 @@ Sau khi đã dự đoán, việc quan trọng cuối cùng là đánh giá độ
 -   `modeltime_forecast()`: hàm để dự đoán giá trị dựa trên mô hình được gán.
 
 ```{r}
-#| warining: false
+#| warning: false
 #| message: false
-#| output: false
+# Hạn chế process trong output:
+tmp_file <- tempfile()
+sink(tmp_file)
 ## Chuyển đối tượng thành dạng bảng để dễ dàng lấy dữ liệu:
+# Disable progress bar for a specific block of code
 modeltime_tbl <- modeltime_table(
     model_fitted
 ) 
 
 ## Đánh giá dữ liệu bằng hàm modeltime_calibrate và hiển thị giá trị dự đoán:
-modeltime_tbl %>%
+k<-modeltime_tbl %>%
   modeltime_calibrate(test_tbl) %>%
     modeltime_forecast(
         new_data    = test_tbl,
         actual_data = daily_df,
         keep_data   = TRUE
-    ) %>%
-    group_by(Warehouse) %>%
-    plot_modeltime_forecast(
-        .facet_ncol = 2, 
-        .interactive = FALSE
-    )
+    ) 
+sink()
+
+# Create the initial forecast plot
+forecast_plot <- plot_modeltime_forecast(k %>% 
+        group_by(Warehouse),
+         .facet_ncol = 2, 
+        .interactive = FALSE)
+
+# Rename the legend labels and customize colors
+forecast_plot_custom <- forecast_plot +
+  scale_color_manual(
+    values = c("ACTUAL" = "darkgray", 
+               "1_H2O AUTOML - GBM" = "red"),  # Optional: Custom colors
+    labels = c("ACTUAL" = "Actual Value", 
+               "1_H2O AUTOML - GBM" = "Model Value")  # New legend labels
+  )
+
+# Print the customized plot
+print(forecast_plot_custom)
 ```
+
+Kết quả đưa ra có vẻ khá tệ khi tới 90% tỉ lệ lệch giữa giá trị quan sát được và giá trị dự đoán vượt quá 5%. Có vẻ Machine Learning không dự đoán tốt đối với trường hợp dữ liệu là chuỗi thời gian.
+
+```{r}
+#| warning: false
+#| message: false
+#| column: column-screen-inset-left
+predict<-k %>% 
+  filter(.key == "prediction") %>% 
+  select(c(.index,Warehouse,.value)) %>% 
+  rename(Date = .index,
+         Predicted = .value) %>% 
+  mutate(Observed = test_tbl$daily_demand,
+         Diff = round((Observed - Predicted)/Observed*100,2),
+         Check = ifelse(Diff <= 5 & Diff >= -5, "Passed","Failed"))
+
+library(gt)
+library(gtExtras)
+gt(predict %>% 
+     group_by(Warehouse) %>% 
+     count(Check) %>% 
+     mutate(Per = round(n/nrow(predict),3))) %>% 
+  cols_label(
+    Check = md("**Warehouse**"),
+    n = md("**Count**"),
+    Per = md("**Percentage**")) %>%
+  tab_header(
+    title = md("**Evaluating the model's accuracy**"),
+    subtitle = glue::glue("Forecasting from {min(test_tbl$Date)} to {max(test_tbl$Date)}")) %>%
+   tab_source_note(
+    source_note = str_glue("Smaller 5% means passed")) %>% 
+  gt_theme_538() %>% 
+  data_color(columns = c("Check"),
+             method = "factor",
+             palette = c("red","blue"))
+
+### Remove Outliers using IQR method:
+filtered_data <- predict %>%
+  group_by(Warehouse) %>%
+  # Remove outliers using the IQR method
+  filter(
+    between(Diff, 
+            quantile(Diff, 0.25) - 1.5 * IQR(Diff),
+            quantile(Diff, 0.75) + 1.5 * IQR(Diff))
+  ) %>%
+  # Adjust values in the Warehouse column
+  mutate(Warehouse = case_when(
+    Warehouse == "Whse_A" ~ "Warehouse A",
+    Warehouse == "Whse_C" ~ "Warehouse C",
+    Warehouse == "Whse_J" ~ "Warehouse J",
+    Warehouse == "Whse_S" ~ "Warehouse S",
+    TRUE ~ as.character(Warehouse)  # Preserve other values if any
+  ))
+
+ggplot(data = filtered_data %>% 
+         group_by(Warehouse),
+       aes(x = Date, 
+           y = Diff)) + 
+  geom_point() +
+  geom_smooth(method = "lm")+
+  geom_abline(intercept = 1, 
+              slope = 0, color="red", 
+              linetype="dashed", 
+              size=1)+
+  xlab('Time') +
+  ylab('Difference (%)') +
+  theme_bw()+
+  facet_wrap(~ Warehouse, scales = "free_y") +
+  labs(title = "Evaluating model builded by GBM method",
+       subtitle = "Observed vs Predicted value",
+       caption = "The red line is abline Y = 0 means accuracry prediction and the blue line is the linear lines between observed and predicted value.")
+```
+
 
 Điều mình thích nhất ở package này là ta có thể dễ dàng dự đoán cho nhiều đối tượng khác nhau chỉ với gán thêm hàm `group_by()`.
 
@@ -375,22 +499,26 @@ refit_tbl <- modeltime_tbl %>%
 ```
 
 ```{r}
-#| warining: false
+#| warning: false
 #| message: false
-refit_tbl %>%
+tmp_file <- tempfile()
+sink(tmp_file)
+refit_tbl<-refit_tbl %>%
     modeltime_forecast(
         new_data    = future_prepared_tbl,
         actual_data = data_prepared_tbl,
         keep_data   = TRUE
-    ) %>%
-    group_by(Warehouse) %>%
-    plot_modeltime_forecast(
-        .facet_ncol  = 2,
-        .interactive = FALSE
-    )
+    ) 
+sink()
+refit_tbl %>% 
+  group_by(Warehouse) %>% 
+  plot_modeltime_forecast(
+         .facet_ncol = 2, 
+         .interactive = FALSE)
+
 ```
 # Kết luận:
 
-Như các bạn đã thấy, package **modeltime** trong R là một công cụ mạnh mẽ để dự báo chuỗi thời gian giúp nâng cao hiệu suất và hiệu suất của quá trình lập mô hình. Điều mình thích nhất chính là không cần phải chuyển đổi dữ liệu chuỗi thời gian sang dạng `zoo` hay `xts` như thông thường mình làm để phân tích. Thật sự package này giúp ích rất nhiều cho việc phân tích dữ liệu chuỗi thời gian.
+Như các bạn đã thấy, package **modeltime** trong R là một công cụ mạnh mẽ để dự báo chuỗi thời gian giúp nâng cao hiệu suất và hiệu suất của quá trình lập mô hình. Điều mình thích nhất chính là không cần phải chuyển đổi dữ liệu chuỗi thời gian sang dạng `zoo` hay `xts` như thông thường mình làm để phân tích. Mặc dù kết quả dự đoán không tốt nhưng thật sự package này giúp ích rất nhiều cho việc phân tích dữ liệu chuỗi thời gian.
 
 Cảm ơn các bạn đã ghé thăm và đọc bài viết của mình!!!
